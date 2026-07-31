@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+models/*.json
+models/*.pkl
+data/*.csv
+.vscode/
+*.egg-info/
+.pytest_cache/
+*.zip

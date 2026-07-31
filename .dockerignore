@@ -1,0 +1,12 @@
+data/
+tests/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.github/
+.gitignore
+.pytest_cache/
+README.md
+*.zip
