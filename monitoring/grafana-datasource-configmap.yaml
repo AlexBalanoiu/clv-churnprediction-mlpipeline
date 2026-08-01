@@ -1,0 +1,20 @@
+# Provisioning automat — Grafana citește fișierele din
+# /etc/grafana/provisioning/datasources/ la pornire și adaugă sursele
+# de date fără să mai fie nevoie să le adaugi manual din UI.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: default
+data:
+  datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        # "prometheus" = numele Service-ului de mai sus; DNS intern k3s
+        # rezolvă automat orice Service din același namespace după nume.
+        url: http://prometheus:9090
+        isDefault: true
+        editable: true

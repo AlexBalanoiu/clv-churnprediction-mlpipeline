@@ -8,7 +8,7 @@ for interactive Swagger UI.
 """
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-
+from prometheus_fastapi_instrumentator import Instrumentator
 from src.inference import predict_customer
 
 app = FastAPI(
@@ -17,6 +17,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
+Instrumentator().instrument(app).expose(app)
 
 class CustomerFeatures(BaseModel):
     frequency_cal: float = Field(..., description="Number of repeat purchases in calibration period")
