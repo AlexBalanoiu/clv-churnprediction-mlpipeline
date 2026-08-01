@@ -21,8 +21,7 @@ spec:
           ports:
             - containerPort: 3000
           env:
-            # doar pentru mediul local de învățare — schimbă/adaugă un Secret
-            # dacă ajunge vreodată accesibil din afara mașinii tale
+            
             - name: GF_SECURITY_ADMIN_PASSWORD
               value: "admin"
           volumeMounts:

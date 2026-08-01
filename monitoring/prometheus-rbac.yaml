@@ -1,6 +1,4 @@
-# Prometheus trebuie să interogheze API-ul Kubernetes ca să descopere
-# automat pod-urile (Service Discovery) — de-aia are nevoie de un
-# ServiceAccount cu drepturi de citire (get/list/watch), nu de scriere.
+
 apiVersion: v1
 kind: ServiceAccount
 metadata:
