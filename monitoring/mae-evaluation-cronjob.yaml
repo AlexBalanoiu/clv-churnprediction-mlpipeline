@@ -1,0 +1,28 @@
+# Rulează evaluate_and_push_mae.py periodic, folosind ACEEAȘI imagine ca
+# API-ul (are deja src/ și models/ înăuntru din Dockerfile) — nu trebuie
+# construită o imagine separată doar pentru asta.
+#
+# Schedule-ul de mai jos (la fiecare 10 minute) e doar ca să vezi rapid
+# rezultatul în Grafana în timpul dezvoltării. În producție reală, cu un
+# orizont de 90 zile, ar avea sens un "0 6 * * 1" (luni dimineața) sau
+# similar — nu are rost mai des decât atât timp cât ground truth-ul oricum
+# nu se schimbă des.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: clv-mae-evaluation
+  namespace: default
+spec:
+  schedule: "*/10 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: mae-evaluation
+              image: ghcr.io/alexbalanoiu/clv-churnprediction-mlpipeline:latest
+              command: ["python", "-m", "src.evaluate_and_push_mae"]
+              env:
+                - name: PUSHGATEWAY_URL
+                  value: "pushgateway:9091"
+          restartPolicy: OnFailure
