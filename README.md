@@ -1,90 +1,122 @@
-# Customer Lifetime Value — End-to-End ML Project
+# Customer Lifetime Value — End-to-End ML Pipeline
 
-Proiect pentru cursul **eVantage Data Science V1.0, Lecția 5** (Classic ML
-End-to-End Project). Predicție de Customer Lifetime Value (CLV) pe 90 de
-zile, folosind XGBoost cu hyperparameter tuning + un layer de clasificare
-pentru risc de churn — expuse printr-un API, containerizate, deployate pe
-Kubernetes (k3s), cu CI/CD pe GitHub Actions și monitoring Prometheus/Grafana.
+An end-to-end machine learning project that predicts 90-day Customer
+Lifetime Value (CLV) and churn risk for e-commerce customers, serves the
+model through a FastAPI service, and ships it with a full CI/CD →
+Kubernetes → monitoring pipeline.
 
-## Ce face proiectul
+## Table of contents
 
-Pentru un client de retail online (dataset [Online
-Retail](https://archive.ics.uci.edu/ml/datasets/Online+Retail), UCI), modelul
-prezice:
-- **CLV pe 90 de zile** (regresie, XGBoost cu hyperparameter tuning via
-  `RandomizedSearchCV`)
-- **Probabilitatea ca respectivul client să rămână activ** în aceeași
-  fereastră (clasificare — Logistic Regression / Decision Tree / Random
-  Forest, ales automat cel cu ROC-AUC mai bun)
-- Combinate într-un **Expected Value** = `CLV_prezis × P(activ)`, folosit ca
-  scor de business pentru prioritizare de retenție
+- [What this project does](#what-this-project-does)
+- [Architecture](#architecture)
+- [Repository structure](#repository-structure)
+- [Local setup](#local-setup)
+- [CI/CD — GitHub Actions](#cicd--github-actions)
+- [Deployment — Kubernetes (k3s) + Helm](#deployment--kubernetes-k3s--helm)
+- [Monitoring — Prometheus + Grafana](#monitoring--prometheus--grafana)
+- [Known issues / roadmap](#known-issues--roadmap)
 
-Rezultate pe test set (ultima rulare cunoscută): MAE ≈ 52.7 GBP (vs. baseline
-naiv ≈ 88.7 GBP → ~40% reducere a erorii), R² ≈ 0.70, churn ROC-AUC ≈ 0.745.
+## What this project does
 
-## Arhitectură
+Given historical transaction data for an online retailer ([Online
+Retail dataset](https://archive.ics.uci.edu/ml/datasets/Online+Retail),
+UCI), the pipeline predicts, per customer:
+
+- **90-day CLV** — regression, XGBoost with hyperparameter tuning via
+  `RandomizedSearchCV` (25 iterations, 3-fold CV, optimizing MAE)
+- **Probability the customer stays active** in that same window —
+  classification; three candidate models (Logistic Regression, Decision
+  Tree, Random Forest) are trained and the best one is selected
+  automatically by ROC-AUC
+- Combined into an **Expected Value** score = `predicted_CLV × P(active)`,
+  used to prioritize retention spend (a customer with high CLV but high
+  churn risk is worth more retention effort than one with high CLV and
+  low risk — a single CLV number doesn't capture that)
+
+**Last known test-set results:** MAE ≈ 52.7 GBP (vs. ≈ 88.7 GBP for a
+naive "predict the mean" baseline — a ~40% error reduction), R² ≈ 0.70,
+churn classifier ROC-AUC ≈ 0.745.
+
+### Why a temporal split, not random train/test
+
+The dataset is split into a *calibration* period (used to build features)
+and a *holdout* period (the last 90 days — used to compute the actual
+target). This matters because a random split would let the model "see"
+information from the future relative to some of its own features, which
+would silently inflate reported accuracy. The calibration/holdout split
+mirrors what happens in production: at prediction time you only ever have
+past behavior, never the outcome you're trying to predict.
+
+## Architecture
 
 ```
-                          ┌─────────────────┐
-                          │  Online Retail   │
-                          │   (CSV, UCI)     │
-                          └────────┬─────────┘
-                                   │
-                    src/data_cleaning.py + features.py
-                                   │
-                          ┌────────▼─────────┐
-                          │   src/train.py    │  (tuning XGBoost +
-                          │                    │   comparație clasificatori)
-                          └────────┬───────────┘
-                                   │ salvează
-                          ┌────────▼─────────┐
-                          │     models/       │
-                          └────────┬───────────┘
-                                   │
-                          ┌────────▼─────────┐
-                          │ src/inference.py  │
-                          │  + main.py (API)  │──── /predict, /health, /metrics
-                          └────────┬───────────┘
-                                   │
-                    Docker (GitHub Actions CI) → GHCR
-                                   │
-                          ┌────────▼─────────┐
-                          │  Helm → k3s        │
-                          │  (helm/clv-api)    │
-                          └────────┬───────────┘
-                                   │
-                    Prometheus (scrape /metrics) → Grafana
-                                   │
-                    CronJob (periodic) → evaluate_and_push_mae.py
-                                   │
-                           Pushgateway → Prometheus (MAE/RMSE/R2/AUC)
+                        ┌─────────────────────┐
+                        │   Online Retail CSV   │
+                        │   (raw transactions)  │
+                        └───────────┬────────────┘
+                                    │
+                  src/data_cleaning.py + src/features.py
+                    (cleaning, RFM, calibration/holdout)
+                                    │
+                        ┌───────────▼────────────┐
+                        │      src/train.py        │
+                        │  hyperparameter-tuned     │
+                        │  XGBoost regressor +      │
+                        │  3-way churn classifier    │
+                        │  comparison                │
+                        └───────────┬────────────┘
+                                    │ saves
+                        ┌───────────▼────────────┐
+                        │        models/            │
+                        │ xgb_clv.json, churn_model  │
+                        │ .pkl, metadata.json        │
+                        └───────────┬────────────┘
+                                    │
+                        ┌───────────▼────────────┐
+                        │   src/inference.py         │
+                        │   + main.py (FastAPI)      │── /predict /health /metrics
+                        └───────────┬────────────┘
+                                    │
+                   Dockerfile → GitHub Actions CI → GHCR
+                                    │
+                        ┌───────────▼────────────┐
+                        │   Helm chart → k3s          │
+                        │   (helm/clv-api)            │
+                        └───────────┬────────────┘
+                                    │
+                Prometheus (scrapes /metrics) ────────► Grafana
+                                    │
+                CronJob (periodic) → evaluate_and_push_mae.py
+                                    │
+                          Pushgateway ──────────────────► Prometheus
+                       (MAE / RMSE / R² / churn ROC-AUC)
 ```
 
-## Structură repo
+## Repository structure
 
 ```
 .
-├── .github/workflows/ci.yml     # test -> train -> build & push imagine (GHCR)
-├── data/                        # online_retail.csv (NU e în git, vezi mai jos)
-├── models/                      # artefacte antrenate (NU e în git, generat de train.py)
+├── .github/workflows/ci.yml       # test -> train -> build & push image (GHCR)
+├── data/                          # online_retail.csv (not committed, see below)
+├── models/                        # trained artifacts (not committed, generated by train.py)
 ├── src/
-│   ├── data_cleaning.py         # load_and_clean()
-│   ├── features.py              # build_features(), FEATURE_COLS
-│   ├── models.py                 # tuning XGBoost + comparație clasificatori churn
-│   ├── train.py                  # entry point — rulează tot pipeline-ul
-│   ├── inference.py              # predict_customer() — folosit și de API
-│   └── evaluate_and_push_mae.py  # job periodic — trimite metrici către Pushgateway
-├── tests/                        # pytest — rulat automat în CI
-├── helm/clv-api/                 # Helm chart pentru deploy pe k3s
-├── monitoring/                   # manifests Prometheus + Grafana + Pushgateway + CronJob
-├── main.py                       # FastAPI wrapper (+ /metrics via Instrumentator)
+│   ├── data_cleaning.py           # load_and_clean()
+│   ├── features.py                # build_features(), FEATURE_COLS
+│   ├── models.py                  # tuned XGBoost + churn classifier comparison
+│   ├── train.py                   # entry point — runs the full pipeline
+│   ├── inference.py               # predict_customer() — also used by the API
+│   └── evaluate_and_push_mae.py   # periodic job — pushes metrics to Pushgateway
+├── tests/                         # pytest, run automatically in CI
+├── helm/clv-api/                  # Helm chart for k3s deployment
+├── monitoring/                    # Prometheus + Grafana + Pushgateway + CronJob manifests
+├── main.py                        # FastAPI wrapper (+ /metrics via Instrumentator)
 ├── Dockerfile
 └── requirements.txt
 ```
 
-## Setup — de la zero (clonat de pe GitHub)
+## Local setup
 
-### 1. Clonează și instalează
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/<user>/<repo>.git
@@ -96,33 +128,34 @@ source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Ia dataset-ul
+### 2. Get the dataset
 
-CSV-ul nu e în git (45MB, CI-ul îl descarcă fresh la fiecare build). Local:
+The CSV isn't committed (45MB — CI downloads it fresh on every build).
+Locally:
 ```bash
 mkdir -p data
 curl -L -o data/online_retail.csv \
   "https://raw.githubusercontent.com/databricks/Spark-The-Definitive-Guide/master/data/retail-data/all/online-retail-dataset.csv"
 ```
 
-### 3. Antrenează modelul
+### 3. Train
 
 ```bash
 python -m src.train
 ```
-Durează sub un minut, produce `models/xgb_clv.json`, `models/churn_model.pkl`,
-`models/metadata.json`.
+Takes under a minute; produces `models/xgb_clv.json`,
+`models/churn_model.pkl`, `models/metadata.json`.
 
-### 4. Pornește API-ul local
+### 4. Run the API locally
 
 ```bash
 uvicorn main:app --reload --port 8000
 ```
-- Swagger UI interactiv: `http://localhost:8000/docs`
+- Interactive docs: `http://localhost:8000/docs`
 - Health check: `http://localhost:8000/health`
-- Metrici Prometheus: `http://localhost:8000/metrics`
+- Prometheus metrics: `http://localhost:8000/metrics`
 
-Test rapid:
+Quick test:
 ```bash
 curl -X POST http://localhost:8000/predict \
   -H "Content-Type: application/json" \
@@ -133,34 +166,36 @@ curl -X POST http://localhost:8000/predict \
   }'
 ```
 
-### 5. Rulează testele
+### 5. Run tests
 
 ```bash
-pytest tests/ -v
+pip install pytest httpx   # if not already installed
+python -m pytest tests/ -v
 ```
 
 ## CI/CD — GitHub Actions
 
-`.github/workflows/ci.yml`, la fiecare push pe `main`:
-1. **test** — `pytest tests/` (orice push/PR, rapid, nu antrenează)
-2. **build-and-push** (doar pe `main`, după ce testele trec) — descarcă
-   dataset-ul, rulează `python -m src.train` (imaginea conține mereu un
-   model proaspăt, nu unul static comis în git), construiește imaginea
-   Docker, o urcă în **GitHub Container Registry**
-   (`ghcr.io/<user>/<repo>:latest` + `:<commit-sha>`)
+`.github/workflows/ci.yml` runs on every push to `main`:
 
-Nu trebuie configurat niciun secret manual — folosește `GITHUB_TOKEN`-ul
-implicit al Actions.
+1. **test** — `pytest tests/` (every push/PR, fast, no training)
+2. **build-and-push** (only on `main`, after tests pass) — downloads the
+   dataset, runs `python -m src.train` (so the image always ships a
+   freshly trained model rather than a static binary committed to git),
+   builds the Docker image, pushes it to **GitHub Container Registry**
+   (`ghcr.io/<user>/<repo>:latest` and `:<commit-sha>`)
 
-**Notă importantă:** pachetele noi din GHCR sunt **private by default**.
-Fă pachetul public din Settings (GitHub → contul tău → Packages →
-pachetul → Package settings → Change visibility), altfel `kubectl` nu va
-putea trage imaginea fără un `imagePullSecret`.
+No manual secrets required — uses the built-in `GITHUB_TOKEN`.
 
-## Deploy pe Kubernetes (k3s + Helm)
+**Note:** new GHCR packages are private by default. Make the package
+public (GitHub → your account → Packages → the package → Package
+settings → Change visibility), or configure an `imagePullSecret` (see
+`helm/clv-api/README.md`) — otherwise `kubectl` won't be able to pull the
+image.
 
-Presupune un cluster k3s funcțional local (`kubectl get nodes` trebuie să
-arate un nod `Ready`) și Helm instalat.
+## Deployment — Kubernetes (k3s) + Helm
+
+Assumes a working k3s cluster (`kubectl get nodes` shows a `Ready` node)
+and Helm installed.
 
 ```bash
 helm install clv helm/clv-api
@@ -168,16 +203,16 @@ kubectl get pods
 kubectl get svc
 ```
 
-Testare locală (port-forward):
+Local testing (port-forward):
 ```bash
 kubectl port-forward svc/clv-clv-api 8000:80
 curl http://localhost:8000/health
 ```
 
-Upgrade după o imagine nouă în GHCR:
+Upgrade after a new image lands in GHCR:
 ```bash
 helm upgrade clv helm/clv-api
-# sau, dacă tag-ul rămâne "latest" și vrei rollout forțat:
+# or, if the tag stays "latest" and you want to force a rollout:
 kubectl rollout restart deployment clv-clv-api
 ```
 
@@ -186,12 +221,13 @@ Rollback:
 helm rollback clv
 ```
 
-Detalii complete (imagePullSecret, valori configurabile) în
+Full details (imagePullSecret, configurable values) in
 `helm/clv-api/README.md`.
 
-## Monitoring — Prometheus + Grafana + Pushgateway
+## Monitoring — Prometheus + Grafana
 
-Manifests simple (nu Prometheus Operator), în `monitoring/`:
+Plain Kubernetes manifests (not the Prometheus Operator), in
+`monitoring/`:
 
 ```bash
 kubectl apply -f monitoring/prometheus-rbac.yaml
@@ -203,55 +239,70 @@ kubectl apply -f monitoring/pushgateway-deployment.yaml
 kubectl apply -f monitoring/mae-evaluation-cronjob.yaml
 ```
 
-- **Prometheus** descoperă automat pod-uri cu adnotarea
-  `prometheus.io/scrape: "true"` (deja setată pe pod-ul `clv-api` din chart)
-  — vezi `http://localhost:9090/targets` (după `kubectl port-forward
-  svc/prometheus 9090:9090`)
-- **Grafana** — `kubectl port-forward svc/grafana 3000:3000`, user/parolă
-  `admin`/`admin` (doar pentru local — schimbă dacă expui vreodată în
-  afara mașinii tale). Datasource Prometheus e deja provizionat automat.
-- **Metrici disponibile din API** (request count + latency, gratuit din
-  instrumentare): `http_requests_total`, `http_request_duration_seconds_bucket`
-  — vezi exemple de query PromQL mai jos.
-- **Pushgateway + CronJob** — `evaluate_and_push_mae.py` rulează periodic
-  (`*/10 * * * *` — interval de test; în producție reală ar avea sens mult
-  mai rar, dat fiind orizontul de 90 zile al modelului) și trimite
-  `clv_model_mae`, `clv_model_rmse`, `clv_model_r2`, `clv_churn_model_roc_auc`.
+- **Prometheus** auto-discovers pods carrying the
+  `prometheus.io/scrape: "true"` annotation (already set on the
+  `clv-api` pod template in the Helm chart) — check
+  `http://localhost:9090/targets` after `kubectl port-forward
+  svc/prometheus 9090:9090`
+- **Grafana** — `kubectl port-forward svc/grafana 3000:3000`,
+  `admin`/`admin` (local-only default — change it if this is ever
+  exposed beyond your machine). The Prometheus datasource is
+  auto-provisioned, no manual setup needed.
+- **Request count / latency** come for free from
+  `prometheus-fastapi-instrumentator` on the API — no extra
+  infrastructure needed for these.
+- **Business metrics (MAE, RMSE, R², churn ROC-AUC)** can't be computed
+  live from request traffic (see below) — they're pushed periodically by
+  a CronJob through a **Pushgateway**.
 
-Query-uri PromQL utile în Grafana:
+Useful PromQL queries:
 ```
 rate(http_requests_total{handler="/predict"}[1m])
 histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{handler="/predict"}[5m]))
 clv_model_mae
+clv_model_rmse
+clv_model_r2
+clv_churn_model_roc_auc
 ```
 
-### ⚠️ Status cunoscut / de reparat
+### Why MAE can't be a live metric
 
-Gauge-urile de business (`clv_model_mae`, `clv_model_rmse`, `clv_model_r2`,
-`clv_churn_model_roc_auc`) **nu apar încă în Grafana la momentul acestui
-commit** — mecanismul de push a fost testat și confirmat funcțional local
-(Pushgateway local + script rulat manual), dar în cluster CronJob-ul nu a
-fost încă declanșat/verificat capăt la capăt. De reparat/verificat:
-- confirmă că CronJob-ul chiar rulează (`kubectl get jobs`, `kubectl get
-  pods | grep clv-mae`)
-- verifică log-urile job-ului (`kubectl logs <pod>`) pentru erori de
-  conectare la `pushgateway:9091`
-- dacă tot nu apare nimic, declanșează manual pentru debugging:
-  ```bash
-  kubectl create job clv-mae-manual-test --from=cronjob/clv-mae-evaluation
-  kubectl wait --for=condition=complete job/clv-mae-manual-test --timeout=120s
-  kubectl logs job/clv-mae-manual-test
-  ```
+Request count and latency exist the moment a request happens — Prometheus
+just scrapes them off `/metrics`. MAE is different: it requires *ground
+truth* (what the customer actually spent), which by definition isn't
+known until the 90-day prediction window has elapsed. You can't compute
+it per-request.
 
-**Notă despre MAE ca metrică:** spre deosebire de request count/latency
-(care există live, din trafic real), MAE necesită ground truth — pe acest
-dataset istoric (2010-2011), scriptul folosește MAE-ul deja calculat pe
-test set la antrenare (din `models/metadata.json`), nu recalculează
-"live" pe date noi (asta ar necesita trafic real + o fereastră de 90 zile
-de așteptare, cum ar fi în producție reală).
+In production, this would mean: log every prediction with a customer ID
+and timestamp, wait for the outcome window to pass, join old predictions
+against newly arrived transactions, and recompute MAE — on a schedule
+(weekly, say), not continuously.
 
-## Pași următori
+This project's dataset is historical and static (2010–2011), so there's
+no "future" traffic to wait for. `evaluate_and_push_mae.py` instead
+re-reports the MAE/RMSE/R²/ROC-AUC already computed on the held-out test
+set during training (`models/metadata.json`), pushed through the same
+mechanism a real production job would use — demonstrating the plumbing
+end-to-end even though the number itself doesn't change between runs
+unless the model is retrained differently.
 
-- Debug complet pentru gauge-urile de mai sus
-- Alertare Grafana pe threshold (ex. MAE peste un anumit prag)
-- Loki + Promtail pentru logging structurat al predicțiilor individuale
+Because Prometheus can only *scrape* — pull from something that's
+running and reachable — and this evaluation job is short-lived (it runs,
+computes, exits), it can't be scraped directly. The **Pushgateway**
+exists exactly for this case: short-lived/batch jobs *push* their metrics
+there, and Prometheus scrapes the Pushgateway itself as a normal, always-
+up target.
+
+## Known issues / roadmap
+
+- Alerting on metric thresholds (e.g. MAE above X) not yet configured in
+  Grafana
+- No persistent storage for Prometheus (`monitoring/prometheus-deployment.yaml`
+  has no PVC) — metrics history is lost on pod restart; fine for a demo,
+  not for production
+- No structured prediction logging (Loki/Promtail) yet — would be needed
+  for a real "recompute MAE against fresh ground truth" job, as opposed
+  to the current static re-report
+- `evaluate_and_push_mae.py` currently runs via a Kubernetes CronJob; an
+  Airflow-based alternative was explored but requires a separate
+  Docker-based Airflow environment, currently out of scope
